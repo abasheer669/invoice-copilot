@@ -33,3 +33,16 @@ def test_secrets_are_masked_in_repr(monkeypatch):
     assert "sk-test-not-a-real-key" not in repr(s)
     assert "postgres:postgres" not in repr(s)
     assert s.llm_api_key.get_secret_value() == "sk-test-not-a-real-key"
+
+
+def test_faults_are_parsed_into_a_mapping(monkeypatch):
+    monkeypatch.setenv("FAULTS", "get_purchase_order:timeout, get_vendor_record:transient")
+    s = Settings(_env_file=None)
+    assert s.faults == {"get_purchase_order": "timeout", "get_vendor_record": "transient"}
+
+
+@pytest.mark.parametrize("value", ["get_purchase_order:tiemout", "get_purchase_order"])
+def test_malformed_faults_are_rejected(monkeypatch, value):
+    monkeypatch.setenv("FAULTS", value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

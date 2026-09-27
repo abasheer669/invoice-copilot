@@ -60,12 +60,35 @@ The application logs in as `ap_app`, which has no rights of its own. Each code p
 
 The credentials in `compose.yaml` and `db/03_roles.sql` are for local development only.
 
+## Tools
+
+The agent reads business data through three read-only tools. Each has a strict input and output schema (`src/ap_agent/erp.py`) and runs one fixed, parameterised query as `ap_reader`.
+
+| Tool | Returns |
+| --- | --- |
+| `get_vendor_record` | Status, bank account last 4 digits, bank country, risk flags, last update |
+| `get_purchase_order` | Lines, total before tax, currency, approval status, goods receipts |
+| `check_invoice_history` | Past invoices from the same vendor that match exactly or probably (FIN-POL-005 §1) |
+
+Every call goes through `invoke()` (`src/ap_agent/tools.py`):
+
+1. Arguments are validated first; bad arguments return `invalid_args` without touching the database.
+2. Each attempt has a hard deadline (`TOOL_TIMEOUT_S`, default 3 s).
+3. Timeouts and transient errors are retried `TOOL_MAX_RETRIES` times (default 2) with backoff.
+4. A missing record returns `not_found` and is not retried.
+5. Output is validated before anyone sees it, so a full bank account number can never pass through.
+
+The result always says what happened (`ok`, `error`, `attempts`, `duration_ms`).
+
+To simulate failures, set `FAULTS`, for example `FAULTS=get_purchase_order:timeout` (FIN-004).
+
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code (`config.py`, `cli.py`, `db.py`) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `tools.py` (tool contract), `erp.py` (ERP tools) |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |
+| `tests/contract/` | Offline tool-contract tests: schemas, timeouts, retries |
 | `tests/integration/` | Tests against the local database |
