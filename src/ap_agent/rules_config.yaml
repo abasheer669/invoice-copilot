@@ -1,0 +1,70 @@
+# Rule values copied from the finance policies. Change a number here, not in code.
+# `sources` pins the policy version each value was copied from; citations are built from it.
+version: rules-1
+
+sources:
+  FIN-POL-001: "3.2"  # Accounts Payable Core Policy
+  FIN-POL-002: "2.4"  # Three-Way Matching and Tolerances
+  FIN-POL-003: "4.0"  # Delegated Financial Authority Matrix
+  FIN-POL-004: "5.1"  # Vendor Onboarding and Bank Detail Changes
+  FIN-POL-005: "2.8"  # Duplicate Invoice and Fraud Controls
+  FIN-POL-009: "1.6"  # Foreign Currency Invoice Processing
+
+# Authority limits are in this currency; FX conversion is out of scope (FIN-POL-009 §2).
+home_currency: AUD
+
+# FIN-POL-002 §2: a line is within tolerance at the lower of the absolute cap
+# and the percentage of the PO line value. Freight only when the PO permits it.
+tolerances:
+  goods: {max_abs: 50, max_pct: 0.01}
+  services: {max_abs: 100, max_pct: 0.02}
+  freight: {max_abs: 75}
+
+# FIN-POL-005 §1: fuzzy duplicate window.
+duplicates:
+  fuzzy_days: 14
+  fuzzy_amount_pct: 0.005
+
+# FIN-POL-003 §2-3: maximum approval per role, including tax. CEO has no cap.
+authority:
+  limits:
+    COST_CENTRE_MANAGER: 10000
+    DEPARTMENT_DIRECTOR: 50000
+    EXECUTIVE_DIRECTOR: 250000
+    CFO: 1000000
+    CEO: null
+  co_approval_role: FINANCIAL_CONTROL
+  new_vendor_days: 30
+  # Assumption: the policy does not define how recent a "changed bank account" is;
+  # this mirrors the 30-day new-vendor window.
+  recent_bank_change_days: 30
+  home_country: AU
+
+# FIN-POL-001 §4: requester, receipter and approver must be distinct above this amount.
+segregation:
+  distinct_roles_above: 25000
+
+# FIN-POL-005 §3: escalate at this many indicators. Language is matched as whole words
+# in the case notes and attachments, so novel phrasing can be missed.
+fraud:
+  escalate_at: 2
+  urgency_terms:
+    - urgent
+    - immediately
+    - asap
+    - same day
+    - pay today
+    - confidential
+    - confidentially
+    - secret
+    - do not tell
+  bypass_terms:
+    - ignore all previous
+    - ignore previous
+    - ignore policy
+    - bypass
+    - skip duplicate
+    - without approval
+    - do not ask
+    - already approved
+    - mark this document as verified

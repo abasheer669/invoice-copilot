@@ -2,12 +2,13 @@ import pytest
 
 from ap_agent import tools
 from ap_agent.erp import PostgresErp, erp_tools
+from ap_agent.rules_config import load_rules
 from ap_agent.tools import invoke
 
 
 @pytest.fixture
 def call(settings):
-    registry = erp_tools(PostgresErp(settings))
+    registry = erp_tools(PostgresErp(settings, load_rules()))
     return lambda name, **args: invoke(registry[name], args, settings)
 
 
@@ -27,7 +28,9 @@ def test_purchase_order_with_lines_total_and_receipt(call):
     result = call("get_purchase_order", po_ref="PO-7788")
     assert result.ok
     po = result.data
-    assert [(line["qty"], line["line_value"]) for line in po["lines"]] == [("100.00", "10000.00")]
+    assert [(line["qty"], line["line_value"], line["tolerance"]) for line in po["lines"]] == [
+        ("100.00", "10000.00", "50.00")  # goods: min(50, 1% of 10,000)
+    ]
     assert po["total"] == "10000.00"
     assert [(r["receipt_id"], r["qty_received"]) for r in po["receipts"]] == [("GR-3341", "100.00")]
 
@@ -36,6 +39,7 @@ def test_purchase_order_without_receipt(call):
     result = call("get_purchase_order", po_ref="PO-9100")
     assert result.ok
     assert result.data["receipts"] == []
+    assert result.data["lines"][0]["tolerance"] == "80.00"  # services: min(100, 2% of 4,000)
 
 
 @pytest.mark.parametrize(
@@ -78,6 +82,6 @@ def test_purchase_order_timeout_fault_gives_up_after_retries(settings, monkeypat
     faulty = settings.model_copy(
         update={"faults": {"get_purchase_order": "timeout"}, "tool_timeout_s": 0.1}
     )
-    registry = erp_tools(PostgresErp(faulty))
+    registry = erp_tools(PostgresErp(faulty, load_rules()))
     result = invoke(registry["get_purchase_order"], {"po_ref": "PO-9100"}, faulty)
     assert (result.ok, result.error, result.attempts) == (False, "timeout", 3)
