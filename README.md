@@ -26,6 +26,49 @@ The SQL files in `db/` run once, in name order, when the database volume is firs
 docker compose down -v && docker compose up -d --wait
 ```
 
+## Running a case
+
+```sh
+uv run ap start --case data/cases/FIN-001.json   # run until approval is needed; prints the result
+uv run ap get RUN_ID --events                     # state, result and audit trail
+uv run ap resume RUN_ID                           # continue from the last save, e.g. after a crash
+FAULTS=get_purchase_order:timeout uv run ap start --case data/cases/FIN-004.json
+```
+
+A run moves through fixed states, and code makes every transition. An illegal transition raises an error, and only a stored human decision can move a run past `AWAITING_APPROVAL`.
+
+```
+RECEIVED -> GATHERING -> CHECKING -> RECOMMENDING -> AWAITING_APPROVAL -> SUBMITTING -> COMPLETED
+                                                                       -> CLOSED
+(any working state) -> FAILED
+```
+
+| State | What happens |
+| --- | --- |
+| `GATHERING` | The mandatory lookups (vendor, invoice history, purchase order) and four standard policy searches |
+| `CHECKING` | The rules engine decides the outcome |
+| `RECOMMENDING` | The typed result is built; the recommendation currently comes straight from the rules engine |
+| `AWAITING_APPROVAL` | The run stops and waits; approval and submission are not built yet |
+
+The run is saved after every tool call and state change, so `ap resume` continues without fetching evidence again. Each save checks a version number, so a stale copy of a run can never overwrite a newer one. An unexpected error ends the run in `FAILED` with its reason. More than `MAX_STEPS` steps also fails the run.
+
+Every step and tool call is logged to `agent.events` with timestamp, run ID, outcome and duration. The logs contain no bank details beyond the last four digits, and no credentials.
+
+The result keeps these apart:
+
+| Field | Contents |
+| --- | --- |
+| `facts` | What the invoice and each lookup said, with its source |
+| `calculations` | Inputs, formula, result and rounding for each calculation |
+| `policy_findings` | Every check with expected, observed and policy citation |
+| `exceptions` | Checks that did not pass, with category and owner (FIN-POL-007) |
+| `inferences` | Conclusions drawn without direct evidence (empty until the LLM is added) |
+| `unknowns` | Failed lookups, unanswered policy searches and checks that could not run |
+| `recommendation` | Outcome, rationale, current-policy citations, assumptions and confidence |
+| `approval` | Required role, Financial Control co-approval and excluded approvers |
+| `next_action` | What has to happen next |
+| `actions_taken` | Decisions recorded for this run |
+
 ## Tests and lint
 
 ```sh
@@ -152,7 +195,7 @@ All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy ve
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py` |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |
