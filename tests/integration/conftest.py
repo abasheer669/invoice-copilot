@@ -84,16 +84,21 @@ def chunk(doc: str, slug: str, section: int, score: float) -> dict:
     }
 
 
-POLICY = [
-    chunk("FIN-POL-001", "segregation-of-duties", 4, 0.70),
-    chunk("FIN-POL-002", "tolerances", 2, 0.80),
-    chunk("FIN-POL-002", "missing-receipt", 4, 0.75),
-    chunk("FIN-POL-003", "standard-operating-expenditure", 2, 0.78),
-    chunk("FIN-POL-004", "bank-account-changes", 2, 0.77),
-    chunk("FIN-POL-005", "duplicate-detection", 1, 0.76),
-    chunk("FIN-POL-005", "fraud-indicators", 3, 0.74),
-    chunk("FIN-POL-009", "currency-agreement", 1, 0.72),
-]
+# Best first, as the real search returns them.
+POLICY = sorted(
+    [
+        chunk("FIN-POL-001", "segregation-of-duties", 4, 0.70),
+        chunk("FIN-POL-002", "tolerances", 2, 0.80),
+        chunk("FIN-POL-002", "missing-receipt", 4, 0.75),
+        chunk("FIN-POL-003", "standard-operating-expenditure", 2, 0.78),
+        chunk("FIN-POL-004", "bank-account-changes", 2, 0.77),
+        chunk("FIN-POL-005", "duplicate-detection", 1, 0.76),
+        chunk("FIN-POL-005", "fraud-indicators", 3, 0.74),
+        chunk("FIN-POL-009", "currency-agreement", 1, 0.72),
+    ],
+    key=lambda c: c["score"],
+    reverse=True,
+)
 
 
 class FakeKB:

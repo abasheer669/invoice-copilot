@@ -1,4 +1,5 @@
 import json
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -7,9 +8,10 @@ from pydantic import ValidationError
 
 from ap_agent import __version__
 from ap_agent.approvals import ApprovalDenied, Callback, DecisionStore
-from ap_agent.config import get_settings
+from ap_agent.config import Settings, get_settings
 from ap_agent.embeddings import make_embedder
 from ap_agent.erp import PostgresErp, erp_tools
+from ap_agent.evals import evaluate_case, load_specs, summary
 from ap_agent.ingest import IngestError, run_ingest
 from ap_agent.ledger import SimLedger, submit_tool
 from ap_agent.llm import make_llm
@@ -147,8 +149,64 @@ def resume(run_id: str) -> None:
     _show(run)
 
 
-def _orchestrator() -> Orchestrator:
-    settings = get_settings()
+class EvalModel(StrEnum):
+    fake = "fake"
+    real = "real"
+
+
+@app.command("eval")
+def evaluate(
+    model: Annotated[
+        EvalModel,
+        typer.Option(help="fake: offline model that accepts the rules draft; real: LLM_MODEL."),
+    ] = EvalModel.fake,
+    cases: Annotated[Path, typer.Option(help="Folder of case .yaml files.")] = Path("data/cases"),
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of a table.")] = False,
+) -> None:
+    """Run every case end to end, approvals included, and report pass/fail and metrics."""
+    base = get_settings()
+    provider = "fake" if model is EvalModel.fake else base.llm_provider
+    results = []
+    if not as_json:
+        typer.echo(
+            f"{'case':<9}{'outcome':<26}{'recall@5':<10}{'citations':<11}"
+            f"{'decisions':<11}{'payments':<10}{'safe':<6}result"
+        )
+    for spec in load_specs(cases):
+        settings = Settings.model_validate(
+            base.model_dump() | {"faults": spec.faults, "llm_provider": provider}
+        )
+        result = evaluate_case(spec, _orchestrator(settings), SimLedger(settings).records_for)
+        results.append(result)
+        if not as_json:
+            recall = "-" if result.recall_at_5 is None else f"{result.recall_at_5:.2f}"
+            typer.echo(
+                f"{result.case:<9}{str(result.outcome):<26}{recall:<10}"
+                f"{f'{result.valid_citations}/{result.citations}':<11}{result.decisions:<11}"
+                f"{result.payments:<10}{'yes' if result.safe else 'NO':<6}"
+                f"{'PASS' if result.passed else 'FAIL'}"
+            )
+            for problem in result.problems:
+                typer.echo(f"         - {problem}")
+    totals = summary(results)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "model": provider,
+                    "results": [r.model_dump() for r in results],
+                    "summary": totals,
+                },
+                indent=2,
+            )
+        )
+    else:
+        typer.echo("\n" + " · ".join(f"{k.replace('_', ' ')} {v}" for k, v in totals.items()))
+    raise typer.Exit(0 if all(r.passed for r in results) else 1)
+
+
+def _orchestrator(settings: Settings | None = None) -> Orchestrator:
+    settings = settings or get_settings()
     rules = load_rules()
     return Orchestrator(
         settings,

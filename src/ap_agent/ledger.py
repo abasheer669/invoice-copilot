@@ -87,6 +87,15 @@ class SimLedger:
                 ).fetchone()
         return {**row, "status": "RECORDED", "replayed": replayed}
 
+    def records_for(self, run_id: str) -> list[dict]:
+        """What the finance API holds for a run; used by the evaluation."""
+        with self._connect() as conn:
+            return conn.execute(
+                """select decision_ref, outcome, amount from mock_erp.sim_ledger
+                   where run_id = %s order by created_at""",
+                [run_id],
+            ).fetchall()
+
 
 def submit_tool(ledger: SimLedger) -> Tool:
     return Tool(
