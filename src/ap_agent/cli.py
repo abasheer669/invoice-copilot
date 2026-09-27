@@ -12,6 +12,7 @@ from ap_agent.embeddings import make_embedder
 from ap_agent.erp import PostgresErp, erp_tools
 from ap_agent.ingest import IngestError, run_ingest
 from ap_agent.ledger import SimLedger, submit_tool
+from ap_agent.llm import make_llm
 from ap_agent.orchestrator import NoIndexError, Orchestrator
 from ap_agent.retrieval import KnowledgeBase
 from ap_agent.rules_config import load_rules
@@ -157,11 +158,14 @@ def _orchestrator() -> Orchestrator:
         KnowledgeBase(settings, make_embedder(settings)),
         DecisionStore(settings),
         submit_tool(SimLedger(settings)),
+        make_llm(settings),
     )
 
 
 def _show(run: Run) -> None:
     view = {"run_id": run.run_id, "case_id": run.case.case_id, "state": run.state}
+    if run.state in ("RECEIVED", "GATHERING", "CHECKING", "RECOMMENDING", "SUBMITTING"):
+        view["note"] = f"Paused; see `ap get {run.run_id} --events`, then `ap resume {run.run_id}`"
     if run.failure_reason:
         view["failure_reason"] = run.failure_reason
     if run.result:

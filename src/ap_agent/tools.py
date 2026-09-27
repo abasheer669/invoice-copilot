@@ -51,6 +51,7 @@ class ToolCall(BaseModel):
     tool: str
     args: dict
     result: ToolResult
+    by: Literal["code", "llm"] = "code"  # who asked for it
 
 
 # Calls run on worker threads so the deadline holds even if a tool ignores its own timeouts.

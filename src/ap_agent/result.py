@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from ap_agent.masking import mask_values
 from ap_agent.rules import ApprovalRequirement, Assessment, Calculation, Outcome
 from ap_agent.schemas import InvoiceCase
 from ap_agent.tools import ToolCall
@@ -117,7 +118,7 @@ def build_result(case: InvoiceCase, calls: list[ToolCall], assessment: Assessmen
             confidence="low" if unknowns else "high",
         ),
         approval=assessment.approval,
-        next_action=_next_action(assessment),
+        next_action=next_action(assessment.outcome, assessment),
         actions_taken=[],
     )
 
@@ -127,7 +128,7 @@ def _unknowns(calls: list[ToolCall], assessment: Assessment) -> list[str]:
     for call in calls:
         if not call.result.ok:
             unknowns.append(
-                f"{call.tool} {call.args} failed: {call.result.error} "
+                f"{call.tool} {mask_values(call.args)} failed: {call.result.error} "
                 f"after {call.result.attempts} attempt(s)"
             )
         elif call.tool == "retrieve_finance_documents" and not call.result.data["policy"]:
@@ -215,7 +216,7 @@ def _sections(citation: str) -> set[int]:
     return set(range(int(match[1]), int(match[2] or match[1]) + 1))
 
 
-def _next_action(assessment: Assessment) -> str:
+def next_action(outcome: Outcome, assessment: Assessment) -> str:
     approval = assessment.approval
     approvers = approval.role + (
         f" and {approval.co_approval_role}" if approval.co_approval_role else ""
@@ -228,4 +229,4 @@ def _next_action(assessment: Assessment) -> str:
         "REJECT_INVALID": "Awaiting confirmation to reject as invalid; no payment proposed",
         "ESCALATE_CONTROL_REVIEW": "Awaiting Financial Control review; do not pay, and do not "
         "tell the supplier about the suspicion",
-    }[assessment.outcome]
+    }[outcome]

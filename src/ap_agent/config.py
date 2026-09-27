@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     # Local Postgres from compose.yaml; local-only development credentials.
     database_url: SecretStr = SecretStr("postgresql://ap_app:ap_app@127.0.0.1:5433/ap_agent")
 
-    llm_provider: str = "gemini"
-    llm_model: str = "gemini-2.5-flash"
+    llm_provider: Literal["gemini", "fake"] = "gemini"  # fake: offline, for tests
+    llm_model: str = "gemini-3.8-flash"
     llm_api_key: SecretStr | None = None
 
     embed_provider: Literal["gemini", "fake"] = "gemini"  # fake: offline, for tests
