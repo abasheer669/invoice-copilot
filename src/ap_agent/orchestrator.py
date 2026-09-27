@@ -1,17 +1,31 @@
 """Runs one invoice case through the state machine, pausing for a human decision.
 
-Code owns every step: which evidence is mandatory, the checks, the outcome, who may
-approve, and each transition. The run is saved after every tool call and state change,
-so a crashed run resumes where it stopped without fetching evidence or submitting twice.
+The model gathers and explains; code decides and writes; a human approves. Code owns
+which evidence is mandatory, the checks, the outcome, who may approve and every
+transition. The run is saved after every tool call and state change, so a crashed run
+resumes where it stopped without fetching evidence or submitting twice.
 """
 
+import hashlib
 import secrets
 import time
-from typing import Protocol
+from collections.abc import Callable
+from typing import Protocol, TypeVar
 
 from psycopg.errors import UniqueViolation
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from ap_agent.agent import (
+    EVIDENCE_SYSTEM,
+    READ_ONLY,
+    RECOMMEND_SYSTEM,
+    LLMRecommendation,
+    case_brief,
+    recommendation_prompt,
+    repair_prompt,
+    tool_result_for_model,
+    validate_recommendation,
+)
 from ap_agent.approvals import (
     Approval,
     ApprovalDenied,
@@ -24,7 +38,9 @@ from ap_agent.approvals import (
 )
 from ap_agent.config import Settings
 from ap_agent.embeddings import Embedder
-from ap_agent.result import build_result
+from ap_agent.llm import LLM, LLMError, ToolRequest, ToolSpec
+from ap_agent.masking import mask_values
+from ap_agent.result import ASSUMPTIONS, Recommendation, build_result, next_action
 from ap_agent.retrieval import retrieval_tool
 from ap_agent.rules import Evidence, assess
 from ap_agent.rules_config import RulesConfig
@@ -57,6 +73,18 @@ class SubmitFailed(Exception):
     pass
 
 
+class RecommendationInvalid(Exception):
+    """The model's recommendation failed validation twice."""
+
+
+class Paused(Exception):
+    """The step cannot finish now, e.g. the model is unavailable; `ap resume` retries it."""
+
+
+T = TypeVar("T")
+CONFIDENCE = ["low", "medium", "high"]
+
+
 class DecisionResponse(BaseModel):
     """The answer to an approval callback; a repeated callback gets the same answer."""
 
@@ -80,6 +108,7 @@ class Orchestrator:
         kb: KnowledgeBaseLike,
         decisions: DecisionStore,
         submit: Tool,
+        llm: LLM,
     ):
         self.settings = settings
         self.store = store
@@ -88,6 +117,7 @@ class Orchestrator:
         self.kb = kb
         self.decisions = decisions
         self.submit = submit  # the only write tool; never part of a run's read-only toolset
+        self.llm = llm
 
     def start(self, case: InvoiceCase) -> Run:
         index_version = self.kb.active_version()
@@ -99,6 +129,7 @@ class Orchestrator:
             index_version=index_version,
             rules_version=self.rules.version,
             embed_model=self.kb.embedder.model_id,
+            llm_model=self.llm.model_id,
         )
         self.store.create(run)
         self.store.event(
@@ -167,6 +198,15 @@ class Orchestrator:
                 steps[run.state](run)
             except StaleRunError:
                 raise  # another process owns the run now; do not overwrite it
+            except Paused as e:
+                self.store.event(
+                    run.run_id,
+                    "run_paused",
+                    name=run.state,
+                    outcome="paused",
+                    payload={"reason": str(e)},
+                )
+                break
             except Exception as e:
                 self._fail(run, f"{type(e).__name__}: {e}")
         return run
@@ -175,18 +215,66 @@ class Orchestrator:
         self._move(run, "GATHERING")  # the case was validated before the run was created
 
     def _gather(self, run: Run) -> None:
+        """The model chooses lookups first; code then runs any mandatory one it skipped,
+        so the model's choices can never remove a control."""
         tools = self._tools(run)
+        self._explore(run, tools)
         for name, args in mandatory_calls(run.case):
-            if not any(c.tool == name and c.args == args for c in run.evidence):
+            if _find(run, tools[name], args) is None:
                 self._call(run, tools[name], args)
         self._move(run, "CHECKING")
 
+    def _explore(self, run: Run, tools: dict[str, Tool]) -> None:
+        """A bounded tool loop: at most MAX_TOOL_CALLS requests, read-only tools only."""
+        budget = self.settings.max_tool_calls
+        used = sum(c.by == "llm" for c in run.evidence)  # counts calls made before a crash
+        specs = [
+            ToolSpec(t.name, t.description, t.input_model.model_json_schema())
+            for t in tools.values()
+        ]
+        brief = case_brief(run.case)
+        try:
+            session = self.llm.tool_session(EVIDENCE_SYSTEM.format(budget=budget), specs)
+            reply = self._ask(run, "evidence", brief, lambda: session.send(brief))
+            while reply.tool_requests and used < budget:
+                results = []
+                for request in reply.tool_requests:  # every request gets an answer
+                    if used < budget:
+                        results.append((request, self._model_tool_call(run, tools, request)))
+                        used += 1
+                    else:
+                        results.append((request, tool_result_for_model(None, "tool budget used")))
+                sent = str([(r.name, r.args) for r, _ in results])
+                reply = self._ask(
+                    run, "evidence", sent, lambda r=results: session.send_tool_results(r)
+                )
+            if reply.tool_requests:
+                self.store.event(run.run_id, "tool_budget_exhausted", outcome=f"{used} calls")
+        except LLMError as e:
+            # The mandatory lookups below still run, so the checks lose nothing.
+            self.store.event(run.run_id, "llm_unavailable", name="evidence", outcome=str(e))
+
+    def _model_tool_call(self, run: Run, tools: dict[str, Tool], request: ToolRequest) -> dict:
+        if request.name not in READ_ONLY or request.name not in tools:
+            self.store.event(
+                run.run_id,
+                "tool_denied",
+                name=request.name,
+                outcome="forbidden",
+                payload={"args": mask_values(request.args)},
+            )
+            return tool_result_for_model(None, f"{request.name} is not an available tool")
+        earlier = _find(run, tools[request.name], request.args)
+        return tool_result_for_model(
+            earlier or self._call(run, tools[request.name], request.args, by="llm")
+        )
+
     def _check(self, run: Run) -> None:
-        case = run.case
+        case, tools = run.case, self._tools(run)
         evidence = Evidence(
-            vendor=_data(run, "get_vendor_record", {"vendor_id": case.vendor_id}),
-            purchase_order=_data(run, "get_purchase_order", {"po_ref": case.po_ref}),
-            history=_data(run, "check_invoice_history", history_args(case)),
+            vendor=_data(run, tools["get_vendor_record"], {"vendor_id": case.vendor_id}),
+            purchase_order=_data(run, tools["get_purchase_order"], {"po_ref": case.po_ref}),
+            history=_data(run, tools["check_invoice_history"], history_args(case)),
         )
         run.assessment = assess(case, evidence, self.rules)
         run.rules_version = self.rules.version
@@ -200,7 +288,21 @@ class Orchestrator:
         self._move(run, "RECOMMENDING")
 
     def _recommend(self, run: Run) -> None:
-        run.result = build_result(run.case, run.evidence, run.assessment)
+        """The rules engine drafts; the model rewrites the draft; code validates the result."""
+        result = build_result(run.case, run.evidence, run.assessment)
+        rec = self._model_recommendation(run, result)
+        ceiling = CONFIDENCE.index(result.recommendation.confidence)  # low if anything is unknown
+        result.recommendation = Recommendation(
+            outcome=rec.outcome,
+            rationale=rec.rationale,
+            citations=rec.citations,
+            assumptions=ASSUMPTIONS + [a for a in rec.assumptions if a not in ASSUMPTIONS],
+            confidence=CONFIDENCE[min(CONFIDENCE.index(rec.confidence), ceiling)],
+        )
+        result.inferences = rec.inferences
+        result.unknowns += [u for u in rec.unknowns if u not in result.unknowns]
+        result.next_action = next_action(rec.outcome, run.assessment)
+        run.result = result
         self.store.event(
             run.run_id,
             "approval_requested",
@@ -208,6 +310,61 @@ class Orchestrator:
             payload=run.result.approval.model_dump(mode="json"),
         )
         self._move(run, "AWAITING_APPROVAL")
+
+    def _model_recommendation(self, run: Run, draft) -> LLMRecommendation:
+        prompt = recommendation_prompt(run.case, run.evidence, run.assessment, draft)
+        schema = LLMRecommendation.model_json_schema()
+        answer, errors = "", []
+        for attempt in (1, 2):  # one repair, then fail explicitly
+            text = repair_prompt(prompt, answer, errors) if errors else prompt
+            try:
+                answer = self._ask(
+                    run,
+                    "recommendation",
+                    text,
+                    lambda text=text: self.llm.generate_json(RECOMMEND_SYSTEM, text, schema),
+                )
+            except LLMError as e:
+                raise Paused(f"model unavailable: {e}") from e
+            rec, errors = validate_recommendation(answer, run.evidence, run.assessment.outcome)
+            if rec:
+                return rec
+            self.store.event(
+                run.run_id,
+                "validation_error",
+                name="recommendation",
+                outcome="rejected",
+                payload={"attempt": attempt, "errors": errors},
+            )
+        raise RecommendationInvalid("; ".join(errors))
+
+    def _ask(self, run: Run, purpose: str, sent: str, send: Callable[[], T]) -> T:
+        """Call the model and log it with a hash of what was sent, never the text itself."""
+        started = time.monotonic()
+        payload = {"model": self.llm.model_id, "sent_sha256": _sha(sent)}
+        try:
+            reply = send()
+        except LLMError as e:
+            self.store.event(
+                run.run_id,
+                "llm_call",
+                name=purpose,
+                outcome="error",
+                duration_ms=_ms(started),
+                payload=payload | {"error": str(e)},
+            )
+            raise
+        if hasattr(reply, "tool_requests"):
+            payload["tool_requests"] = [r.name for r in reply.tool_requests]
+        self.store.event(
+            run.run_id,
+            "llm_call",
+            name=purpose,
+            outcome="ok",
+            duration_ms=_ms(started),
+            payload=payload,
+        )
+        return reply
 
     def _record_approval(self, callback: Callback) -> Approval:
         run = self.store.load(callback.run_id)
@@ -296,12 +453,14 @@ class Orchestrator:
         run.result.next_action = f"Done: {receipt['outcome']} recorded as {receipt['decision_ref']}"
         self._move(run, "COMPLETED")
 
-    def _call(self, run: Run, tool: Tool, args: dict) -> None:
+    def _call(self, run: Run, tool: Tool, args: dict, by: str = "code") -> ToolCall:
         result = invoke(tool, args, self.settings)
-        run.evidence.append(ToolCall(tool=tool.name, args=args, result=result))
+        call = ToolCall(tool=tool.name, args=args, result=result, by=by)
+        if result.error != "invalid_args":  # a malformed request is logged, not evidence
+            run.evidence.append(call)
         run.tool_call_count += 1
         self.store.save(run)
-        payload = {"args": args, "attempts": result.attempts, "error": result.error}
+        payload = {"args": mask_values(args), "attempts": result.attempts, "error": result.error}
         if result.ok and tool.name == "retrieve_finance_documents":
             payload["index_version"] = result.data["index_version"]
             payload["policy"] = [c["chunk_id"] for c in result.data["policy"]]
@@ -312,8 +471,9 @@ class Orchestrator:
             name=tool.name,
             outcome="ok" if result.ok else result.error,
             duration_ms=result.duration_ms,
-            payload=payload,
+            payload=payload | {"by": by},
         )
+        return call
 
     def _move(self, run: Run, state: State) -> None:
         started = time.monotonic()
@@ -363,13 +523,36 @@ def mandatory_calls(case: InvoiceCase) -> list[tuple[str, dict]]:
     return calls
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
 def _idempotency_key(run: Run) -> str:
     return f"{run.run_id}:{run.result.recommendation.outcome}" if run.result else ""
 
 
-def _data(run: Run, tool: str, args: dict) -> dict | None:
-    """The latest successful result of this exact call, or None if it failed or never ran."""
+def _same_args(tool: Tool, a: dict, b: dict) -> bool:
+    """Compare arguments as the tool reads them, so 8800 and "8800.00" are the same call."""
+    try:
+        return tool.input_model.model_validate(a) == tool.input_model.model_validate(b)
+    except ValidationError:
+        return a == b
+
+
+def _find(run: Run, tool: Tool, args: dict, ok_only: bool = False) -> ToolCall | None:
+    """The latest recorded call of this tool with these arguments."""
     for call in reversed(run.evidence):
-        if call.tool == tool and call.args == args and call.result.ok:
-            return call.result.data
+        if call.tool == tool.name and (call.result.ok or not ok_only):
+            if _same_args(tool, call.args, args):
+                return call
     return None
+
+
+def _data(run: Run, tool: Tool, args: dict) -> dict | None:
+    """The latest successful result of this call, or None if it failed or never ran."""
+    call = _find(run, tool, args, ok_only=True)
+    return call.result.data if call else None

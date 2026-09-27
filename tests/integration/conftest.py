@@ -11,6 +11,7 @@ from ap_agent.config import Settings
 from ap_agent.embeddings import FakeEmbedder
 from ap_agent.erp import PostgresErp, erp_tools
 from ap_agent.ledger import SimLedger, submit_tool
+from ap_agent.llm import EchoLLM
 from ap_agent.orchestrator import Orchestrator
 from ap_agent.rules_config import load_rules
 from ap_agent.runs import RunStore
@@ -121,7 +122,7 @@ def fake_kb():
 def make_orchestrator(settings, store, decisions, ledger, monkeypatch):
     monkeypatch.setattr(tools, "BACKOFF_S", 0)
 
-    def make(kb=None, erp=None, submit=None, rules=None, **overrides) -> Orchestrator:
+    def make(kb=None, erp=None, submit=None, rules=None, llm=None, **overrides) -> Orchestrator:
         run_settings = settings.model_copy(update={"tool_timeout_s": 0.2, **overrides})
         rules = rules or load_rules()
         return Orchestrator(
@@ -132,6 +133,7 @@ def make_orchestrator(settings, store, decisions, ledger, monkeypatch):
             kb or FakeKB(),
             decisions,
             submit or submit_tool(ledger),
+            llm or EchoLLM(),
         )
 
     return make

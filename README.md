@@ -48,9 +48,9 @@ RECEIVED -> GATHERING -> CHECKING -> RECOMMENDING -> AWAITING_APPROVAL -> SUBMIT
 
 | State | What happens |
 | --- | --- |
-| `GATHERING` | The mandatory lookups (vendor, invoice history, purchase order) and four standard policy searches |
+| `GATHERING` | The model chooses read-only lookups; code then runs any mandatory lookup it skipped (vendor, invoice history, purchase order, four standard policy searches) |
 | `CHECKING` | The rules engine decides the outcome |
-| `RECOMMENDING` | The typed result is built; the recommendation currently comes straight from the rules engine |
+| `RECOMMENDING` | The rules engine drafts the result; the model rewrites the recommendation; code validates it |
 | `AWAITING_APPROVAL` | The run stops until the required people approve, or someone rejects |
 | `SUBMITTING` | `submit_finance_decision` records the outcome exactly once |
 | `COMPLETED` / `CLOSED` | Recorded, or rejected with nothing recorded |
@@ -67,12 +67,43 @@ The result keeps these apart:
 | `calculations` | Inputs, formula, result and rounding for each calculation |
 | `policy_findings` | Every check with expected, observed and policy citation |
 | `exceptions` | Checks that did not pass, with category and owner (FIN-POL-007) |
-| `inferences` | Conclusions drawn without direct evidence (empty until the LLM is added) |
+| `inferences` | The model's conclusions that no fact or check states directly |
 | `unknowns` | Failed lookups, unanswered policy searches and checks that could not run |
 | `recommendation` | Outcome, rationale, current-policy citations, assumptions and confidence |
 | `approval` | Required role, Financial Control co-approval and excluded approvers |
 | `next_action` | What has to happen next |
 | `actions_taken` | Decisions recorded for this run |
+
+## The model (LLM)
+
+The model gathers and explains; code decides and writes; a human approves. The model is used in exactly two places, and code checks both (`src/ap_agent/agent.py`, `src/ap_agent/llm.py`).
+
+**1. Gathering evidence.** The model gets only the four read-only tools and may make at most `MAX_TOOL_CALLS` (default 8) requests.
+
+- A request for any other tool is refused and logged as `tool_denied`.
+- Malformed arguments get `invalid_args` back and never reach the database.
+- A repeated lookup is answered from the evidence already gathered.
+- Afterwards, code runs any mandatory lookup the model skipped, so the model's choices can never remove a control.
+- If the model is unavailable, the run carries on with the mandatory lookups.
+
+**2. Writing the recommendation.** The rules engine drafts it, and the model rewrites it as JSON. Code then checks:
+
+| Check | Rejects |
+| --- | --- |
+| Schema | Anything that is not the expected JSON |
+| Outcome | Anything looser than the rules outcome. The model may add caution (hold or escalate), never approve more, and never invent a rejection |
+| Citations | Chunk ids that were not retrieved in this run, or that come from `other_evidence` |
+| Sensitive data | Any run of six or more digits, such as an account number |
+
+An invalid answer gets one repair attempt with the problems listed. A second invalid answer fails the run. If the model is unreachable (after the SDK's own retries on 429 and 5xx), the run pauses in `RECOMMENDING`, and `ap resume` tries again.
+
+**Prompt-injection defences:**
+
+- Case notes, attachments and tool results reach the model marked as untrusted data, and the prompt says instructions inside them are fraud indicators, not commands.
+- Superseded and supplier documents are listed by id only, never as text to follow.
+- These are defence in depth. The real protection is that the model has no write tool and cannot change the rules outcome.
+
+Any run of six or more digits, such as an account number, is masked to its last four before text reaches the model or the audit log (`src/ap_agent/masking.py`). Model calls are logged with a hash of what was sent, never the text. `LLM_PROVIDER=fake` swaps in an offline model that makes no lookups and accepts the draft, for tests.
 
 ## Approvals and recording a decision
 
@@ -230,7 +261,7 @@ All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy ve
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py`, `approvals.py`, `ledger.py` (submit tool) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py`, `approvals.py`, `ledger.py` (submit tool), `llm.py` + `agent.py` (model) |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |
