@@ -5,9 +5,10 @@ Provider and model names live here only, so orchestration code never hard-codes 
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -34,8 +35,16 @@ class Settings(BaseSettings):
 
     retrieval_min_score: float = Field(default=0.5, ge=0, le=1)
 
-    # Fault injection, e.g. "get_purchase_order:timeout".
-    faults: str = ""
+    # Fault injection: comma-separated tool:kind, e.g. "get_purchase_order:timeout".
+    # timeout = every attempt hangs past the deadline; transient = the first attempt fails.
+    faults: Annotated[dict[str, Literal["timeout", "transient"]], NoDecode] = {}
+
+    @field_validator("faults", mode="before")
+    @classmethod
+    def _parse_faults(cls, value: object) -> object:
+        if isinstance(value, str):
+            return dict(item.strip().split(":", 1) for item in value.split(",") if item.strip())
+        return value
 
 
 @lru_cache
