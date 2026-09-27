@@ -87,6 +87,9 @@ def test_sim_ledger_rejects_a_repeated_idempotency_key(settings):
 
 def test_only_one_kb_index_can_be_active(settings):
     with connect("ap_ingest", settings) as conn, conn.transaction(force_rollback=True):
+        conn.execute(
+            "update agent.kb_index_versions set status = 'RETIRED' where status = 'ACTIVE'"
+        )
         conn.execute(KB_INSERT, ["kb-a"])
         with pytest.raises(UniqueViolation), conn.transaction():
             conn.execute(KB_INSERT, ["kb-b"])
