@@ -1,0 +1,17 @@
+{
+  "case_id": "FIN-004",
+  "invoice_ref": "MFS-2209",
+  "vendor_id": "V-3003",
+  "po_ref": "PO-9100",
+  "invoice_date": "2026-09-20",
+  "amount": "4400.00",
+  "tax_amount": "400.00",
+  "currency": "AUD",
+  "lines": [
+    {"line_no": 1, "description": "Office cleaning, September", "qty": 1, "unit_price": "4000.00", "kind": "services"}
+  ],
+  "remit_to_last4": "5520",
+  "requested_by": "s.okafor",
+  "notes": "Monthly cleaning",
+  "attachments": []
+}

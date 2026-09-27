@@ -1,0 +1,10 @@
+case: FIN-005
+input: data/cases/FIN-005.json
+description: Same data as FIN-001; the approval callback is delivered twice.
+expected_outcome: APPROVE_FOR_POSTING
+must_cite: [FIN-POL-002, FIN-POL-003]
+must_not_cite: [ADV-001, ADV-002, FIN-POL-003-OLD]
+approval: {approver: j.smith, role: DEPARTMENT_DIRECTOR, callback_id: cb-fin-005}
+callback_deliveries: 2
+decisions: 1
+payment_submits: 1

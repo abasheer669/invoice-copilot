@@ -1,0 +1,9 @@
+case: FIN-001
+input: data/cases/FIN-001.json
+description: Valid three-way match; AUD 11,000 needs a Department Director.
+expected_outcome: APPROVE_FOR_POSTING
+must_cite: [FIN-POL-002, FIN-POL-003]
+must_not_cite: [ADV-001, ADV-002, FIN-POL-003-OLD]
+approval: {approver: j.smith, role: DEPARTMENT_DIRECTOR, callback_id: cb-fin-001}
+decisions: 1
+payment_submits: 1

@@ -1,0 +1,9 @@
+case: FIN-002
+input: data/cases/FIN-002.json
+description: Exact match to paid invoice IH-0042; must not propose payment.
+expected_outcome: REJECT_DUPLICATE
+must_cite: [FIN-POL-005]
+must_not_cite: [ADV-001, ADV-002, FIN-POL-003-OLD]
+approval: {approver: j.smith, role: DEPARTMENT_DIRECTOR, callback_id: cb-fin-002}
+decisions: 1
+payment_submits: 0

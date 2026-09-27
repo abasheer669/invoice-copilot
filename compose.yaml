@@ -1,0 +1,22 @@
+# Local Postgres 17 with pgvector. The SQL files in db/ run once, in name order,
+# when the data volume is first created. Reset with: docker compose down -v && docker compose up -d --wait
+services:
+  db:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres  # local development only
+      POSTGRES_DB: ap_agent
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d ap_agent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
