@@ -1,14 +1,27 @@
-"""Runs one invoice case through the state machine until it needs a human or fails.
+"""Runs one invoice case through the state machine, pausing for a human decision.
 
-Code owns every step: which evidence is mandatory, the checks, the outcome and each
-transition. The run is saved after every tool call and state change, so a crashed run
-resumes where it stopped without fetching the same evidence twice.
+Code owns every step: which evidence is mandatory, the checks, the outcome, who may
+approve, and each transition. The run is saved after every tool call and state change,
+so a crashed run resumes where it stopped without fetching evidence or submitting twice.
 """
 
 import secrets
 import time
 from typing import Protocol
 
+from psycopg.errors import UniqueViolation
+from pydantic import BaseModel
+
+from ap_agent.approvals import (
+    Approval,
+    ApprovalDenied,
+    Callback,
+    Decision,
+    DecisionStore,
+    approval_problem,
+    approvals_needed,
+    outstanding,
+)
 from ap_agent.config import Settings
 from ap_agent.embeddings import Embedder
 from ap_agent.result import build_result
@@ -40,6 +53,23 @@ class NoIndexError(Exception):
     pass
 
 
+class SubmitFailed(Exception):
+    pass
+
+
+class DecisionResponse(BaseModel):
+    """The answer to an approval callback; a repeated callback gets the same answer."""
+
+    run_id: str
+    callback_id: str
+    approval_id: str
+    decision: Decision
+    state: State
+    decision_ref: str | None
+    replayed: bool
+    next_action: str
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -48,12 +78,16 @@ class Orchestrator:
         rules: RulesConfig,
         erp_tools: dict[str, Tool],
         kb: KnowledgeBaseLike,
+        decisions: DecisionStore,
+        submit: Tool,
     ):
         self.settings = settings
         self.store = store
         self.rules = rules
         self.erp_tools = erp_tools
         self.kb = kb
+        self.decisions = decisions
+        self.submit = submit  # the only write tool; never part of a run's read-only toolset
 
     def start(self, case: InvoiceCase) -> Run:
         index_version = self.kb.active_version()
@@ -82,7 +116,39 @@ class Orchestrator:
     def resume(self, run_id: str) -> Run:
         run = self.store.load(run_id)
         self.store.event(run_id, "run_resumed", outcome=run.state)
-        return self.advance(run)
+        return self._settle(run)
+
+    def decide(self, callback: Callback) -> DecisionResponse:
+        """Handle an approval callback. A repeat of a stored callback changes nothing and
+        returns the same answer; the run is then taken as far as its approvals allow."""
+        approval = self.decisions.by_callback(callback.callback_id)
+        replayed = approval is not None
+        if approval is None:
+            try:
+                approval = self._record_approval(callback)
+            except UniqueViolation:  # the same callback arrived twice at the same moment
+                approval, replayed = self.decisions.by_callback(callback.callback_id), True
+        if not approval.answers(callback):
+            raise ApprovalDenied(f"callback {callback.callback_id} was used for another decision")
+        if replayed:
+            self.store.event(
+                approval.run_id,
+                "callback_replayed",
+                name=callback.callback_id,
+                outcome=approval.decision,
+            )
+        run = self._settle(self.store.load(approval.run_id))
+        receipt = self.decisions.decision(_idempotency_key(run))
+        return DecisionResponse(
+            run_id=run.run_id,
+            callback_id=approval.callback_id,
+            approval_id=approval.approval_id,
+            decision=approval.decision,
+            state=run.state,
+            decision_ref=receipt["decision_ref"] if receipt else None,
+            replayed=replayed,
+            next_action=run.result.next_action,
+        )
 
     def advance(self, run: Run) -> Run:
         """Run steps until the run waits for a human, finishes or fails."""
@@ -91,6 +157,7 @@ class Orchestrator:
             "GATHERING": self._gather,
             "CHECKING": self._check,
             "RECOMMENDING": self._recommend,
+            "SUBMITTING": self._submit,
         }
         while run.state in steps:
             if run.step_count >= self.settings.max_steps:
@@ -141,6 +208,93 @@ class Orchestrator:
             payload=run.result.approval.model_dump(mode="json"),
         )
         self._move(run, "AWAITING_APPROVAL")
+
+    def _record_approval(self, callback: Callback) -> Approval:
+        run = self.store.load(callback.run_id)
+        if run.state != "AWAITING_APPROVAL":
+            raise ApprovalDenied(f"{run.run_id} is {run.state}, not awaiting approval")
+        prior = self.decisions.for_run(run.run_id)
+        problem = approval_problem(run, callback, prior, self.rules, self.kb.active_version())
+        who = {"approver": callback.approver, "role": callback.role}
+        if problem:
+            self.store.event(
+                run.run_id,
+                "approval_denied",
+                name=callback.callback_id,
+                outcome="denied",
+                payload=who | {"decision": callback.decision, "reason": problem},
+            )
+            raise ApprovalDenied(problem)
+        approval = self.decisions.record(callback)
+        self.store.event(
+            run.run_id,
+            "approval_recorded",
+            name=callback.callback_id,
+            outcome=callback.decision,
+            payload=who | {"approval_id": approval.approval_id},
+        )
+        return approval
+
+    def _settle(self, run: Run) -> Run:
+        """Move a waiting run on if its stored decisions allow it, then continue."""
+        if run.state == "AWAITING_APPROVAL":
+            approvals = self.decisions.for_run(run.run_id)
+            rejection = next((a for a in approvals if a.decision == "REJECT"), None)
+            remaining = outstanding(approvals_needed(run, self.rules), approvals)
+            if rejection:
+                run.result.next_action = (
+                    f"Closed: {rejection.approver} ({rejection.role}) rejected the "
+                    "recommendation; nothing was recorded"
+                )
+                self._move(run, "CLOSED")
+            elif not remaining:
+                self._move(run, "SUBMITTING")
+            elif approvals:
+                run.result.next_action = (
+                    f"Awaiting {', '.join(n.label for n in remaining)} approval as well"
+                )
+                self.store.save(run)
+        return self.advance(run)
+
+    def _submit(self, run: Run) -> None:
+        """Record the approved outcome exactly once. The decisions table stops a resumed run
+        calling the API again; the API's idempotency key covers a crash in between."""
+        key = _idempotency_key(run)
+        receipt = self.decisions.decision(key)
+        if receipt is None:
+            approval = [a for a in self.decisions.for_run(run.run_id) if a.decision == "APPROVE"]
+            args = {
+                "idempotency_key": key,
+                "run_id": run.run_id,
+                "outcome": run.result.recommendation.outcome,
+                "amount": str(run.case.amount),
+                "currency": run.case.currency,
+                "approval_id": approval[-1].approval_id,
+            }
+            result = invoke(self.submit, args, self.settings)
+            run.tool_call_count += 1
+            self.store.event(
+                run.run_id,
+                "tool_call",
+                name=self.submit.name,
+                outcome="ok" if result.ok else result.error,
+                duration_ms=result.duration_ms,
+                payload={
+                    "idempotency_key": key,
+                    "attempts": result.attempts,
+                    "error": result.error,
+                    "data": result.data,
+                },
+            )
+            if not result.ok:
+                raise SubmitFailed(f"{self.submit.name} failed: {result.error}")
+            receipt = result.data
+            self.decisions.record_decision(key, run.run_id, receipt)
+        run.result.actions_taken.append(
+            {"action": self.submit.name, "idempotency_key": key} | receipt
+        )
+        run.result.next_action = f"Done: {receipt['outcome']} recorded as {receipt['decision_ref']}"
+        self._move(run, "COMPLETED")
 
     def _call(self, run: Run, tool: Tool, args: dict) -> None:
         result = invoke(tool, args, self.settings)
@@ -207,6 +361,10 @@ def mandatory_calls(case: InvoiceCase) -> list[tuple[str, dict]]:
         calls.append(("get_purchase_order", {"po_ref": case.po_ref}))
     calls += [("retrieve_finance_documents", {"query": q, "k": 5}) for q in STANDARD_QUERIES]
     return calls
+
+
+def _idempotency_key(run: Run) -> str:
+    return f"{run.run_id}:{run.result.recommendation.outcome}" if run.result else ""
 
 
 def _data(run: Run, tool: str, args: dict) -> dict | None:
