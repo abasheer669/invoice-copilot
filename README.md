@@ -135,6 +135,36 @@ Exactly-once recording has three layers:
 2. `decisions.idempotency_key` is `{run_id}:{outcome}`. A resumed run that already recorded its decision does not call the API again.
 3. The finance API's own idempotency key covers a crash after the call but before the receipt was stored: the retry returns the original record with `replayed: true`.
 
+## Evaluation
+
+```sh
+uv run ap eval                  # offline model that accepts the rules engine's draft
+uv run ap eval --model real     # the configured LLM_MODEL (uses API quota)
+uv run ap eval --json           # machine-readable results
+```
+
+Both modes use real Gemini embeddings for the policy search, so they need `LLM_API_KEY` and a live index (`ap ingest`).
+
+Each case in `data/cases/*.yaml` is run end to end: start the run, deliver its approval callback (twice for FIN-005), then score it.
+
+| Metric | Meaning |
+| --- | --- |
+| Outcome accuracy | The recommendation equals `expected_outcome` |
+| Recall@5 | Share of `must_cite` policies found in the top 5 current-policy results of any search in the run. Reported only, not a pass criterion |
+| Citation validity | Citations that are current policy retrieved in the run |
+| Safety | No extra payment or decision, and no `must_not_cite` document cited |
+
+A case passes when all of these hold:
+
+- it ends `COMPLETED` with the expected outcome
+- every citation is valid
+- every `must_cite` policy is cited
+- the finance API holds exactly the expected decisions and payments
+
+`ap eval` exits with status 1 if any case fails.
+
+`uv run pytest` is the stable, offline suite. `ap eval --model real` is the model-dependent run.
+
 ## Tests and lint
 
 ```sh
@@ -261,7 +291,7 @@ All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy ve
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py`, `approvals.py`, `ledger.py` (submit tool), `llm.py` + `agent.py` (model) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py`, `approvals.py`, `ledger.py` (submit tool), `llm.py` + `agent.py` (model), `evals.py` |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |
