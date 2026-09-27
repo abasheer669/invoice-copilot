@@ -1,0 +1,21 @@
+# Every new index must return each expected document in its top 5 current-policy
+# results, and nothing for an off-topic query (expect: null), or the build fails and
+# the live index stays in place.
+- query: price variance tolerance between invoice and purchase order line
+  expect: FIN-POL-002
+- query: invoice without a goods receipt
+  expect: FIN-POL-002
+- query: approval limit for a Department Director
+  expect: FIN-POL-003
+- query: supplier asks to change bank account details for payment
+  expect: FIN-POL-004
+- query: duplicate invoice that was already paid
+  expect: FIN-POL-005
+- query: fraud indicators such as urgent payment language or a request to bypass approval
+  expect: FIN-POL-005
+- query: invoice currency does not match the purchase order
+  expect: FIN-POL-009
+- query: segregation of duties between requester, receipter and approver
+  expect: FIN-POL-001
+- query: chocolate cake recipe
+  expect: null

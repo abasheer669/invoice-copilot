@@ -15,7 +15,10 @@ uv sync                        # create .venv from uv.lock
 cp .env.example .env           # then set LLM_API_KEY
 docker compose up -d --wait    # Postgres 17 + pgvector on 127.0.0.1:5433, schema and seed data loaded
 uv run ap config               # effective settings, secrets masked
+uv run ap ingest               # embed the policy corpus with Gemini and make the index live
 ```
+
+`ap ingest` calls the Gemini API with `LLM_API_KEY`. Without a key, `EMBED_PROVIDER=fake` builds an offline index for trying things out.
 
 The SQL files in `db/` run once, in name order, when the database volume is first created. To rebuild from scratch:
 
@@ -38,6 +41,7 @@ All business data is synthetic. Invoice fields arrive pre-extracted in the case 
 | --- | --- |
 | `data/corpus/` | The 15 policy documents, including superseded, irrelevant and adversarial ones |
 | `data/cases/` | Acceptance cases FIN-001 to FIN-005: input (`.json`) and expected behaviour (`.yaml`) |
+| `data/golden_queries.yaml` | Queries every new index must answer before it goes live |
 | `db/04_seed.sql` | Simulated vendors, purchase orders, goods receipts and invoice history |
 
 ## Database
@@ -82,6 +86,36 @@ The result always says what happened (`ok`, `error`, `attempts`, `duration_ms`).
 
 To simulate failures, set `FAULTS`, for example `FAULTS=get_purchase_order:timeout` (FIN-004).
 
+## Knowledge base (RAG)
+
+`ap ingest` builds a new version of the policy index:
+
+1. Load the 15 documents in `data/corpus/` and validate their front-matter.
+2. Check there is one current version of each policy, and that `rules_config.yaml` was copied from those versions. Stale rule values stop the build.
+3. Split each document into one chunk per `##` section (58 chunks). Each chunk is prefixed with the document, version, section and status before embedding.
+4. Embed the chunks with `EMBED_MODEL` at `EMBED_DIM` dimensions.
+5. Run the golden queries in `data/golden_queries.yaml`: each must find its policy in the top 5.
+6. Make the new index live and retire the old one.
+
+All six steps run in one transaction, so a failure anywhere leaves the live index untouched. All documents are ingested, including the superseded, irrelevant and adversarial ones, so retrieval can label them.
+
+`retrieve_finance_documents(query, k)`:
+
+- embeds the query with the same model, and refuses an index built with a different one
+- ranks chunks by cosine similarity in pgvector
+- drops results below `RETRIEVAL_MIN_SCORE`, and policies not yet in effect
+
+It returns two lists, each ranked separately so neither crowds out the other:
+
+- `policy`: current policy, the only text that may be cited as authority
+- `other_evidence`: superseded, irrelevant or supplier text, labelled as such, e.g. `FIN-POL-003-OLD v1.0 (SUPERSEDED)` or `ADV-001 v1.0 (UNTRUSTED)`
+
+Limitations:
+
+- Pure embedding search can miss exact codes such as `FIN-POL-003`; hybrid keyword + vector search would fix that.
+- An exact scan is fine for 58 chunks; thousands would need a fixed dimension and an HNSW index.
+- The corpus is small and synthetic, so retrieval quality here says little about a real policy library.
+
 ## Rules
 
 Code decides the outcome; the LLM will only explain it. `src/ap_agent/rules.py` runs every check on every case. Each check is a pure function over exact decimals and returns:
@@ -118,7 +152,7 @@ All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy ve
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG) |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |
