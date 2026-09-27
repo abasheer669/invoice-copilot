@@ -1,7 +1,9 @@
+import re
 from decimal import Decimal
 
 import pytest
 
+from ap_agent.result import OWNERS
 from ap_agent.rules import Assessment, CheckResult, Evidence, assess
 from ap_agent.rules_config import CENT, load_rules
 from ap_agent.schemas import InvoiceCase
@@ -283,3 +285,8 @@ def test_above_25000_requester_who_received_the_goods_escalates():
 def test_duplicate_outranks_escalation():
     result = run(case(remit_to_last4="8842"), history={"matches": [match("EXACT", "PAID")]})
     assert result.outcome == "REJECT_DUPLICATE"
+
+
+def test_every_check_has_an_exception_owner():
+    families = {re.sub(r"_L\d+$", "", c.rule_id) for c in run().checks}
+    assert families == set(OWNERS)

@@ -41,3 +41,11 @@ def test_config_never_prints_secrets(monkeypatch):
     assert "sk-test-not-a-real-key" not in result.output
     assert "hunter2" not in result.output
     assert json.loads(result.output)["llm_api_key"] == "**********"
+
+
+def test_start_rejects_a_malformed_case_file(tmp_path):
+    bad = tmp_path / "case.json"
+    bad.write_text('{"case_id": "FIN-X", "remit_to_last4": "062000123444471"}')
+    result = runner.invoke(app, ["start", "--case", str(bad)])
+    assert result.exit_code == 1
+    assert "Invalid case file" in result.output

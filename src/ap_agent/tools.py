@@ -45,6 +45,14 @@ class ToolResult(BaseModel):
     duration_ms: int
 
 
+class ToolCall(BaseModel):
+    """One call as recorded in a run's evidence."""
+
+    tool: str
+    args: dict
+    result: ToolResult
+
+
 # Calls run on worker threads so the deadline holds even if a tool ignores its own timeouts.
 _workers = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tool")
 
