@@ -10,6 +10,7 @@ from ap_agent.erp import (
     VendorRecord,
     erp_tools,
 )
+from ap_agent.rules_config import load_rules
 from ap_agent.tools import Tool, invoke
 
 HISTORY_ARGS = {
@@ -22,7 +23,7 @@ HISTORY_ARGS = {
 
 
 def test_registry_holds_exactly_the_three_read_only_tools():
-    tools = erp_tools(PostgresErp(Settings(_env_file=None)))
+    tools = erp_tools(PostgresErp(Settings(_env_file=None), load_rules()))
     assert set(tools) == {"get_vendor_record", "get_purchase_order", "check_invoice_history"}
 
 
@@ -52,6 +53,7 @@ def test_vendor_record_with_a_full_bank_account_is_rejected():
         "bank_country": "AU",
         "bank_changed_at": None,
         "risk_flags": [],
+        "created_at": "2023-03-01T09:00:00+10:00",
         "updated_at": "2026-06-01T09:00:00+10:00",
     }
     tool = Tool("get_vendor_record", "", VendorQuery, VendorRecord, lambda args: leaky)

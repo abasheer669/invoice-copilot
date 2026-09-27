@@ -82,11 +82,43 @@ The result always says what happened (`ok`, `error`, `attempts`, `duration_ms`).
 
 To simulate failures, set `FAULTS`, for example `FAULTS=get_purchase_order:timeout` (FIN-004).
 
+## Rules
+
+Code decides the outcome; the LLM will only explain it. `src/ap_agent/rules.py` runs every check on every case. Each check is a pure function over exact decimals and returns:
+
+- `PASS`, `FAIL` or `UNKNOWN` (evidence missing)
+- the expected and observed facts, any calculation with its inputs and rounding
+- the policy citation, and what a failure leads to
+
+| Check | Rule | Policy |
+| --- | --- | --- |
+| `DUPLICATE` | No exact or probable match in invoice history | FIN-POL-005 §1-2 |
+| `VENDOR_STATUS` | Vendor is `ACTIVE` | FIN-POL-004 §4 |
+| `BANK_DETAILS` | Remit-to account matches the vendor master | FIN-POL-004 §2 |
+| `PURCHASE_ORDER` | An approved PO for the same vendor | FIN-POL-002 §1 |
+| `CURRENCY` | Invoice and PO in the same currency, and in AUD | FIN-POL-009 §1-2 |
+| `RECEIPT_L{n}` | Invoiced quantity is not more than received | FIN-POL-002 §2, §4 |
+| `PRICE_L{n}` | Price variance within the lower of the cap and the percentage | FIN-POL-002 §2 |
+| `INVOICE_TOTAL` | Lines plus tax equal the gross amount | FIN-POL-002 §1 |
+| `FRAUD_INDICATORS` | Fewer than 2 of: bank change, urgent or secret language, request to bypass controls | FIN-POL-005 §3 |
+| `SEGREGATION` | Above AUD 25,000, the requester did not receive the goods | FIN-POL-001 §4 |
+
+The outcome is the most severe consequence among the checks that did not pass:
+
+1. `REJECT_DUPLICATE`: an exact match to a paid or posted invoice
+2. `ESCALATE_CONTROL_REVIEW`: bank mismatch, fraud indicators or a segregation conflict
+3. `HOLD_FOR_INFORMATION`: any other failure, or anything `UNKNOWN`
+4. `APPROVE_FOR_POSTING`: everything passed
+
+The engine also works out who must approve. That is the lowest role whose limit covers the gross amount, plus Financial Control for higher-risk payments (new vendor, changed or overseas bank account, fraud flag). The requester is always excluded from approving; above AUD 25,000, receipters are excluded too.
+
+All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy version it came from. Citations are built from those versions.
+
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `tools.py` (tool contract), `erp.py` (ERP tools) |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine) |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |

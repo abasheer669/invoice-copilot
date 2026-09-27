@@ -17,14 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ap_agent.config import Settings
 from ap_agent.db import connect
+from ap_agent.rules_config import LineKind, RulesConfig
+from ap_agent.schemas import Currency, Ref
 from ap_agent.tools import NotFoundError, Tool, TransientError
-
-# Duplicate-matching limits from FIN-POL-005 §1.
-FUZZY_DAYS = 14
-FUZZY_AMOUNT_PCT = Decimal("0.005")
-
-Ref = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$")]
-Currency = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 
 
 class _Args(BaseModel):
@@ -46,6 +41,7 @@ class VendorRecord(BaseModel):
     bank_country: str
     bank_changed_at: datetime | None
     risk_flags: list[str]
+    created_at: datetime
     updated_at: datetime
 
 
@@ -59,10 +55,11 @@ class PurchaseOrderQuery(_Args):
 class PoLine(BaseModel):
     line_no: int
     description: str
-    kind: Literal["goods", "services", "freight"]
+    kind: LineKind
     qty: Decimal
     unit_price: Decimal
     line_value: Decimal
+    tolerance: Decimal  # allowed price variance for this line (FIN-POL-002 §2)
 
 
 class GoodsReceipt(BaseModel):
@@ -110,14 +107,15 @@ class InvoiceHistory(BaseModel):
 
 
 class PostgresErp:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, rules: RulesConfig):
         self.settings = settings
+        self.rules = rules
 
     def get_vendor(self, q: VendorQuery) -> dict:
         with self._reader() as conn:
             row = conn.execute(
                 """select vendor_id, legal_name, status, bank_last4, bank_country,
-                          bank_changed_at, risk_flags, updated_at
+                          bank_changed_at, risk_flags, created_at, updated_at
                    from mock_erp.vendors where vendor_id = %s""",
                 [q.vendor_id],
             ).fetchone()
@@ -145,13 +143,15 @@ class PostgresErp:
                    from mock_erp.goods_receipts where po_ref = %s order by receipt_id""",
                 [q.po_ref],
             ).fetchall()
+        for line in lines:
+            line["tolerance"] = self.rules.tolerances.limit_for(line["kind"], line["line_value"])
         total = sum((line["line_value"] for line in lines), Decimal("0.00"))
         return {**po, "lines": lines, "total": total, "receipts": receipts}
 
     def check_invoice_history(self, q: InvoiceHistoryQuery) -> dict:
         """EXACT: same vendor, normalised invoice number, currency and amount.
         FUZZY: same vendor and either the same punctuation-stripped invoice number, or an
-        invoice date within FUZZY_DAYS and an amount within FUZZY_AMOUNT_PCT."""
+        invoice date and amount within the rules_config duplicates window."""
         ref_norm = q.invoice_ref.strip().upper()
         with self._reader() as conn:
             rows = conn.execute(
@@ -172,8 +172,8 @@ class PostgresErp:
                     "currency": q.currency,
                     "amount": q.amount,
                     "invoice_date": q.invoice_date,
-                    "days": FUZZY_DAYS,
-                    "pct": FUZZY_AMOUNT_PCT,
+                    "days": self.rules.duplicates.fuzzy_days,
+                    "pct": self.rules.duplicates.fuzzy_amount_pct,
                 },
             ).fetchall()
         return {"matches": rows}
