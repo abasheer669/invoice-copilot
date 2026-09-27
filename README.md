@@ -33,6 +33,9 @@ uv run ap start --case data/cases/FIN-001.json   # run until approval is needed;
 uv run ap get RUN_ID --events                     # state, result and audit trail
 uv run ap resume RUN_ID                           # continue from the last save, e.g. after a crash
 FAULTS=get_purchase_order:timeout uv run ap start --case data/cases/FIN-004.json
+
+uv run ap approve RUN_ID --approver j.smith --role DEPARTMENT_DIRECTOR --callback-id cb-001
+uv run ap reject  RUN_ID --approver j.smith --role DEPARTMENT_DIRECTOR --callback-id cb-002
 ```
 
 A run moves through fixed states, and code makes every transition. An illegal transition raises an error, and only a stored human decision can move a run past `AWAITING_APPROVAL`.
@@ -48,7 +51,9 @@ RECEIVED -> GATHERING -> CHECKING -> RECOMMENDING -> AWAITING_APPROVAL -> SUBMIT
 | `GATHERING` | The mandatory lookups (vendor, invoice history, purchase order) and four standard policy searches |
 | `CHECKING` | The rules engine decides the outcome |
 | `RECOMMENDING` | The typed result is built; the recommendation currently comes straight from the rules engine |
-| `AWAITING_APPROVAL` | The run stops and waits; approval and submission are not built yet |
+| `AWAITING_APPROVAL` | The run stops until the required people approve, or someone rejects |
+| `SUBMITTING` | `submit_finance_decision` records the outcome exactly once |
+| `COMPLETED` / `CLOSED` | Recorded, or rejected with nothing recorded |
 
 The run is saved after every tool call and state change, so `ap resume` continues without fetching evidence again. Each save checks a version number, so a stale copy of a run can never overwrite a newer one. An unexpected error ends the run in `FAILED` with its reason. More than `MAX_STEPS` steps also fails the run.
 
@@ -68,6 +73,36 @@ The result keeps these apart:
 | `approval` | Required role, Financial Control co-approval and excluded approvers |
 | `next_action` | What has to happen next |
 | `actions_taken` | Decisions recorded for this run |
+
+## Approvals and recording a decision
+
+Nothing is recorded until the right people approve. The gate (`src/ap_agent/approvals.py`) checks:
+
+| Outcome | Who must approve |
+| --- | --- |
+| `APPROVE_FOR_POSTING` | A role whose limit covers the gross amount (FIN-POL-003 §2), plus Financial Control for higher-risk payments (§3) |
+| `ESCALATE_CONTROL_REVIEW` | Financial Control |
+| `HOLD_FOR_INFORMATION`, `REJECT_*` | Any known approver role |
+
+It also refuses:
+
+- the requester, and above AUD 25,000 the receipter (FIN-POL-001 §4)
+- anyone who has already decided the run, so the two approvals come from two people
+- any approval after the rules or policy index changed since the recommendation; start a new run instead
+
+A refusal is logged as `approval_denied` and changes nothing. `ap reject` closes the run and records nothing.
+
+`submit_finance_decision` (`src/ap_agent/ledger.py`) is the only write tool:
+
+- It is never given to the model. The orchestrator calls it only from `SUBMITTING`, after the required approvals are stored.
+- It refuses a run with no stored approval.
+- It records to the simulated finance API (`mock_erp.sim_ledger`) and cannot move money.
+
+Exactly-once recording has three layers:
+
+1. `approvals.callback_id` is unique. A repeated callback gets the same answer, marked `replayed`, and no second decision (FIN-005).
+2. `decisions.idempotency_key` is `{run_id}:{outcome}`. A resumed run that already recorded its decision does not call the API again.
+3. The finance API's own idempotency key covers a crash after the call but before the receipt was stored: the retry returns the original record with `replayed: true`.
 
 ## Tests and lint
 
@@ -195,7 +230,7 @@ All numbers live in `src/ap_agent/rules_config.yaml`, each tied to the policy ve
 
 | Path | Contents |
 | --- | --- |
-| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py` |
+| `src/ap_agent/` | Application code: `config.py`, `cli.py`, `db.py`, `schemas.py` (invoice case), `tools.py` (tool contract), `erp.py` (ERP tools), `rules.py` + `rules_config.yaml` (rules engine), `embeddings.py`, `ingest.py`, `retrieval.py` (RAG), `runs.py` (state and persistence), `orchestrator.py`, `result.py`, `approvals.py`, `ledger.py` (submit tool) |
 | `db/` | Schemas, tables, roles and seed data |
 | `compose.yaml` | Local Postgres + pgvector |
 | `tests/unit/` | Offline unit tests |

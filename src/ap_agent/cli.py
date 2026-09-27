@@ -6,10 +6,12 @@ import typer
 from pydantic import ValidationError
 
 from ap_agent import __version__
+from ap_agent.approvals import ApprovalDenied, Callback, DecisionStore
 from ap_agent.config import get_settings
 from ap_agent.embeddings import make_embedder
 from ap_agent.erp import PostgresErp, erp_tools
 from ap_agent.ingest import IngestError, run_ingest
+from ap_agent.ledger import SimLedger, submit_tool
 from ap_agent.orchestrator import NoIndexError, Orchestrator
 from ap_agent.retrieval import KnowledgeBase
 from ap_agent.rules_config import load_rules
@@ -101,6 +103,38 @@ def get_run(
             )
 
 
+Approver = Annotated[str, typer.Option("--approver", help="Who is deciding.")]
+Role = Annotated[str, typer.Option("--role", help="Their role, e.g. DEPARTMENT_DIRECTOR.")]
+CallbackId = Annotated[
+    str,
+    typer.Option("--callback-id", help="Unique per decision; a repeat is answered, not redone."),
+]
+
+
+@app.command()
+def approve(run_id: str, approver: Approver, role: Role, callback_id: CallbackId) -> None:
+    """Approve a run's recommendation; once all approvals are in, it is recorded once."""
+    _decide(run_id, approver, role, callback_id, "APPROVE")
+
+
+@app.command()
+def reject(run_id: str, approver: Approver, role: Role, callback_id: CallbackId) -> None:
+    """Reject a run's recommendation; the run closes and nothing is recorded."""
+    _decide(run_id, approver, role, callback_id, "REJECT")
+
+
+def _decide(run_id: str, approver: str, role: str, callback_id: str, decision: str) -> None:
+    try:
+        callback = Callback(
+            run_id=run_id, approver=approver, role=role, callback_id=callback_id, decision=decision
+        )
+        response = _orchestrator().decide(callback)
+    except (ValidationError, ApprovalDenied, RunNotFound) as e:
+        typer.echo(f"Not accepted: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(response.model_dump_json(indent=2))
+
+
 @app.command()
 def resume(run_id: str) -> None:
     """Continue a run from its last checkpoint, reusing evidence already gathered."""
@@ -121,6 +155,8 @@ def _orchestrator() -> Orchestrator:
         rules,
         erp_tools(PostgresErp(settings, rules)),
         KnowledgeBase(settings, make_embedder(settings)),
+        DecisionStore(settings),
+        submit_tool(SimLedger(settings)),
     )
 
 
