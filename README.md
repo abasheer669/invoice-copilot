@@ -75,23 +75,75 @@ So the model does not change any of the five test outcomes: the evaluation passe
 
 ## Quick start
 
-Everything runs locally: Postgres with pgvector in Docker, and a Python CLI. The only external service is the Gemini API, for the chat model and embeddings. No cloud account or credentials are needed.
+This takes about 10 minutes. Everything runs on your own computer. Only the database runs in Docker; the app itself runs through `uv`, which installs the right Python and libraries for you. Tested on macOS; Linux works the same way.
 
-### Prerequisites
+### Step 1: Install three tools (once)
 
-- macOS or Linux
-- [uv](https://docs.astral.sh/uv/) (`brew install uv`); it installs Python 3.13
-- Docker with Compose, running
-- A Gemini API key from [Google AI Studio](https://aistudio.google.com/). The free tier works.
+| Tool | What it is for | How to get it |
+| --- | --- | --- |
+| Git | Downloads the code | Usually already installed. Check with `git --version` |
+| Docker Desktop | Runs the database | [docker.com](https://www.docker.com/products/docker-desktop/). Open it and wait until it says it is running |
+| uv | Installs Python 3.13 and the exact libraries | `brew install uv`, or `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 
-### Setup
+### Step 2: Get a free Gemini API key (once)
+
+1. Open [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and sign in with a Google account.
+2. Click **Create API key** and copy the key.
+
+This key is the only outside service the app needs. Google's Gemini provides the AI model and the embeddings used to search the policies. The free tier is enough; see [Cost and cleanup](#cost-and-cleanup) for its limits.
+
+### Step 3: Download and set up
 
 ```sh
-uv sync                        # install pinned dependencies from uv.lock
-cp .env.example .env           # then set LLM_API_KEY in .env
-docker compose up -d --wait    # Postgres 17 + pgvector on 127.0.0.1:5433; schema and seed load on first start
-uv run ap ingest               # embed the 15 policy documents and make the index live (~10 s)
+git clone https://github.com/abasheer669/invoice-copilot.git
+cd invoice-copilot
+uv sync                  # installs Python 3.13 and the pinned libraries
+cp .env.example .env     # creates your settings file
 ```
+
+Open `.env` in any text editor, paste your key after `LLM_API_KEY=` (so the line reads `LLM_API_KEY=AIza...`), and save. `.env` is never committed.
+
+### Step 4: Start the database and load the policies
+
+```sh
+docker compose up -d --wait    # starts Postgres with pgvector and loads the sample data
+uv run ap ingest               # loads the 15 policy documents into the search index (about 10 seconds)
+```
+
+`ap ingest` should print a line ending in `is live` and then `Golden queries: 9 of 9 found`.
+
+### Step 5: Try it
+
+```sh
+uv run ap eval
+```
+
+This runs all five sample invoices from start to finish, approvals included, and prints a table. Every row should say `PASS`.
+
+To walk through one invoice yourself:
+
+```sh
+uv run ap start --case data/cases/FIN-001.json
+```
+
+The output shows the recommendation and a `run_id` such as `run_1f532282`. Use it in the commands under [Run a case](#run-a-case).
+
+### When you are done
+
+```sh
+docker compose down       # stop the database, keeping its data
+docker compose down -v    # or: stop it and delete all data (run Step 4 again to rebuild)
+```
+
+### If something goes wrong
+
+| You see | What to do |
+| --- | --- |
+| `connection refused`, or `database not running` in the tests | Docker Desktop is not running. Start it, then run `docker compose up -d --wait` |
+| `port is already allocated` for 5433 | Another program is using port 5433. Stop it, or change the port in `compose.yaml` and in `DATABASE_URL` in `.env` |
+| `LLM_API_KEY is not set` | Paste your key into `.env` (Step 3) |
+| `No live knowledge base; run ap ingest first` | Run `uv run ap ingest` (Step 4) |
+| `429 RESOURCE_EXHAUSTED` or `503 UNAVAILABLE` | Gemini's free-tier limit was reached, or Google is busy. Wait a minute and try again; daily limits reset the next day. A run stopped this way shows `Paused`, and `uv run ap resume RUN_ID` continues it |
 
 ### Run a case
 
