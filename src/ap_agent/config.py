@@ -13,8 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # Local Supabase Postgres (`supabase start`); well-known local-only default.
-    database_url: SecretStr = SecretStr("postgresql://postgres:postgres@127.0.0.1:54322/postgres")
+    # Local Postgres from compose.yaml; local-only development credentials.
+    database_url: SecretStr = SecretStr("postgresql://ap_app:ap_app@127.0.0.1:5433/ap_agent")
 
     llm_provider: str = "gemini"
     llm_model: str = "gemini-2.5-flash"

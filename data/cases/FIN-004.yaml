@@ -1,0 +1,10 @@
+case: FIN-004
+input: data/cases/FIN-004.json
+description: Purchase-order lookup times out after retries and PO-9100 has no receipt.
+faults: get_purchase_order:timeout
+expected_outcome: HOLD_FOR_INFORMATION
+must_cite: [FIN-POL-002]
+must_not_cite: [ADV-001, ADV-002, FIN-POL-003-OLD]
+approval: {approver: j.smith, role: DEPARTMENT_DIRECTOR, callback_id: cb-fin-004}
+decisions: 1
+payment_submits: 0

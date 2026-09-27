@@ -1,0 +1,17 @@
+{
+  "case_id": "FIN-001",
+  "invoice_ref": "INV-5521",
+  "vendor_id": "V-1001",
+  "po_ref": "PO-7788",
+  "invoice_date": "2026-09-20",
+  "amount": "11000.00",
+  "tax_amount": "1000.00",
+  "currency": "AUD",
+  "lines": [
+    {"line_no": 1, "description": "Office chair", "qty": 100, "unit_price": "100.00", "kind": "goods"}
+  ],
+  "remit_to_last4": "4471",
+  "requested_by": "a.nguyen",
+  "notes": "Chairs for Level 3 fitout",
+  "attachments": []
+}

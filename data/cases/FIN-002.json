@@ -1,0 +1,17 @@
+{
+  "case_id": "FIN-002",
+  "invoice_ref": "INV-3310",
+  "vendor_id": "V-1001",
+  "po_ref": "PO-7701",
+  "invoice_date": "2026-08-15",
+  "amount": "5500.00",
+  "tax_amount": "500.00",
+  "currency": "AUD",
+  "lines": [
+    {"line_no": 1, "description": "Desk lamp", "qty": 50, "unit_price": "100.00", "kind": "goods"}
+  ],
+  "remit_to_last4": "4471",
+  "requested_by": "a.nguyen",
+  "notes": "Supplier resent this invoice and says the original was not received",
+  "attachments": []
+}
