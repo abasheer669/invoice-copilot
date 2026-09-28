@@ -10,7 +10,6 @@ An accounts-payable agent for supplier invoices. For each invoice case it:
 
 **Core principle: the model gathers and explains; code decides and writes; a person approves.**
 
-Detailed design (modules, data model, tool contracts, rules, retrieval, approvals, audit events, failure handling) is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Contents
 
